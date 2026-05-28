@@ -1,578 +1,821 @@
 /* ==================================================================
-   Tailor · CV Atelier — vanilla JS
-   Static demo: simulated AI analysis, real PDF/Word downloads.
+   Tailor · AI CV Studio
+   - Real extraction (pdf.js / mammoth, loaded via CDN)
+   - Heuristic parse into a structured, EDITABLE CV
+   - Real keyword match scoring against the job description
+   - Live preview is the single source of truth
+   - Downloads serialise the CURRENT preview state (never a sample)
    ================================================================== */
 
 (function () {
   "use strict";
 
-  /* ----------------------------------------------------------------
-     State
-     ---------------------------------------------------------------- */
+  if (window.pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
 
+  /* ----------------------------------------------------------------
+     State.  cv === null until the user uploads + enhances.
+     ---------------------------------------------------------------- */
   const state = {
     step: 1,
-    cvFile: null,
-    jdMode: "paste",          // 'paste' | 'upload'
+    cvText: "",
+    cv: null,                // structured CV built from the REAL upload
+    jdMode: "paste",
     jdText: "",
-    jdFile: null,
-    selectedTheme: "editorial",
-    analysis: null,           // {score, missingKeywords, gaps, improvements}
-    cv: null,                 // the displayed tailored CV
+    selectedTheme: "exec",
+    analysis: null,
+    zoom: null,              // null = fit-to-width
+    focusBind: null,         // re-focus this data-bind path after re-render
   };
 
-  const STEPS = ["Upload CV", "Job Description", "Choose Theme", "Tailor & Preview"];
+  const STEPS = ["Upload CV", "Job Description", "Template", "Enhance & Export"];
 
   /* ----------------------------------------------------------------
-     Sample tailored CV — used after the simulated analysis runs.
-     Generic but realistic so the demo isn't tied to one person.
+     A small placeholder CV — shown ONLY in the template thumbnails on
+     step 3 before a real CV exists.  It is NEVER used for download.
      ---------------------------------------------------------------- */
-
-  const SAMPLE_TAILORED_CV = {
-    name: "Sarah Mitchell",
-    title: "Senior Product Marketing Manager",
-    location: "London, UK",
-    phone: "+44 7700 900123",
-    email: "sarah.mitchell@email.com",
-    website: "sarahmitchell.work",
+  const PLACEHOLDER_CV = {
+    name: "Your Name",
+    title: "Your Professional Title",
+    location: "City, Country",
+    phone: "+000 000 0000",
+    email: "you@email.com",
+    website: "yourportfolio.com",
     summary:
-      "Product marketing leader with 8+ years driving go-to-market strategy for SaaS and consumer tech. Proven record translating complex products into clear positioning, partnering with cross-functional teams, and delivering measurable revenue impact. Skilled in B2B narrative development, customer research, and integrated launch campaigns aligned to growth-stage commercial goals.",
-    competencies: [
-      "Go-to-Market Strategy",
-      "Positioning & Messaging",
-      "Cross-Functional Leadership",
-      "Customer Research",
-      "Launch Campaign Management",
-      "Sales Enablement",
-    ],
+      "Your tailored professional summary appears here once you upload a CV and run the enhancement. Every field below becomes editable.",
+    competencies: ["Core skill", "Core skill", "Core skill", "Core skill"],
     experience: [
-      {
-        role: "Senior Product Marketing Manager",
-        company: "Northwind SaaS",
-        dates: "2021 – Present",
-        location: "London, UK",
-        bullets: [
-          "Led GTM strategy for three product launches, contributing $4.2M in pipeline within 12 months.",
-          "Built positioning framework adopted by sales, marketing and product, lifting demo conversion 38%.",
-          "Established competitive intelligence program informing roadmap and sales enablement at scale.",
-        ],
-      },
-      {
-        role: "Product Marketing Manager",
-        company: "Vantage Cloud",
-        dates: "2018 – 2021",
-        location: "London, UK",
-        bullets: [
-          "Owned messaging for enterprise tier; partnered with sales to close $1.8M in expansion ARR.",
-          "Ran 40+ customer discovery interviews shaping persona work used across the marketing org.",
-        ],
-      },
-      {
-        role: "Marketing Associate",
-        company: "Brightline Studio",
-        dates: "2016 – 2018",
-        location: "Manchester, UK",
-        bullets: [
-          "Executed integrated campaigns across paid, organic and lifecycle, growing MQLs 62% YoY.",
-        ],
-      },
+      { role: "Most recent role", company: "Company", dates: "2021 – Present", location: "City", bullets: ["Achievement-led bullet with a measurable outcome.", "Second bullet aligned to the target role."] },
+      { role: "Previous role", company: "Company", dates: "2018 – 2021", location: "City", bullets: ["Concise outcome statement with scope or metric."] },
     ],
-    education: [
-      {
-        degree: "BA (Hons) Marketing & Business",
-        school: "University of Manchester",
-        dates: "Graduated 2016",
-      },
-    ],
-    skills: ["Notion", "HubSpot", "Figma", "Looker", "Webflow", "Pendo"],
-    achievements: [
-      "Speaker, SaaStock 2024 — 'Positioning that survives a re-launch'",
-      "Marketing Week '30 Under 30' — Product Marketing, 2022",
-    ],
+    education: [{ degree: "Degree", school: "University", dates: "Year" }],
+    skills: ["Tool", "Tool", "Tool", "Tool"],
+    languages: ["English"],
+    achievements: ["Notable recognition or achievement"],
   };
 
-  /* ----------------------------------------------------------------
-     Themes — render fns return HTML strings
-     ---------------------------------------------------------------- */
+  /* ================================================================
+     1.  FILE EXTRACTION (runs in the browser)
+     ================================================================ */
 
-  const escapeHtml = (s = "") =>
-    s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-
-  const renderEditorial = (cv) => `
-    <div class="cv-a4 cv-editorial">
-      <div class="cv-editorial__head">
-        <div>
-          <h1 class="cv-editorial__name">${escapeHtml(cv.name)}</h1>
-          <p class="cv-editorial__title">${escapeHtml(cv.title)}</p>
-        </div>
-        <div class="cv-editorial__contact">
-          <div>${escapeHtml(cv.email)}</div>
-          <div>${escapeHtml(cv.phone)}</div>
-          <div>${escapeHtml(cv.location)}</div>
-          ${cv.website ? `<div>${escapeHtml(cv.website)}</div>` : ""}
-        </div>
-      </div>
-
-      <p class="cv-editorial__summary">${escapeHtml(cv.summary)}</p>
-
-      <div class="cv-editorial__cols">
-        <div>
-          <div class="cv-section-title">Experience</div>
-          ${cv.experience
-            .map(
-              (e) => `
-            <div class="cv-editorial__job">
-              <div class="cv-editorial__job-head">
-                <div class="cv-editorial__role">${escapeHtml(e.role)}</div>
-                <div class="cv-meta">${escapeHtml(e.dates)}</div>
-              </div>
-              <div class="cv-editorial__company">${escapeHtml(e.company)} · ${escapeHtml(e.location)}</div>
-              <ul class="cv-editorial__bullets">
-                ${e.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
-              </ul>
-            </div>`
-            )
-            .join("")}
-        </div>
-
-        <div>
-          <div class="cv-section-title">Core Competencies</div>
-          <ul class="cv-editorial__sidebar-list">
-            ${cv.competencies.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}
-          </ul>
-
-          <div class="cv-section-title">Education</div>
-          ${cv.education
-            .map(
-              (ed) => `
-            <div style="margin-bottom:8px;">
-              <div class="cv-editorial__edu-degree">${escapeHtml(ed.degree)}</div>
-              <div class="cv-editorial__edu-school">${escapeHtml(ed.school)} · ${escapeHtml(ed.dates)}</div>
-            </div>`
-            )
-            .join("")}
-
-          <div class="cv-section-title">Tools & Skills</div>
-          <div class="cv-editorial__skills">
-            ${cv.skills.map((s) => `<span class="cv-editorial__skill">${escapeHtml(s)}</span>`).join("")}
-          </div>
-
-          ${
-            cv.achievements && cv.achievements.length
-              ? `<div class="cv-section-title">Recognition</div>
-                 <ul class="cv-editorial__achievements">
-                   ${cv.achievements.map((a) => `<li>${escapeHtml(a)}</li>`).join("")}
-                 </ul>`
-              : ""
-          }
-        </div>
-      </div>
-    </div>
-  `;
-
-  const renderMinimal = (cv) => `
-    <div class="cv-a4 cv-minimal">
-      <h1 class="cv-minimal__name">${escapeHtml(cv.name)}</h1>
-      <div class="cv-minimal__rule">
-        <div class="line"></div>
-        <p class="cv-minimal__title">${escapeHtml(cv.title)}</p>
-        <div class="line"></div>
-      </div>
-      <div class="cv-minimal__contact">
-        ${escapeHtml(cv.location)} · ${escapeHtml(cv.phone)} · ${escapeHtml(cv.email)}${
-    cv.website ? " · " + escapeHtml(cv.website) : ""
-  }
-      </div>
-
-      <p class="cv-minimal__summary">${escapeHtml(cv.summary)}</p>
-
-      <div class="cv-minimal__section">
-        <div class="cv-minimal__section-title">Experience</div>
-        ${cv.experience
-          .map(
-            (e) => `
-          <div class="cv-minimal__job">
-            <div class="cv-minimal__job-head">
-              <div>
-                <span class="cv-minimal__role">${escapeHtml(e.role)}</span>
-                <span class="cv-minimal__role-co"> · ${escapeHtml(e.company)}</span>
-              </div>
-              <div class="cv-minimal__job-date">${escapeHtml(e.dates)}</div>
-            </div>
-            <ul class="cv-minimal__bullets">
-              ${e.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
-            </ul>
-          </div>`
-          )
-          .join("")}
-      </div>
-
-      <div class="cv-minimal__cols">
-        <div>
-          <div class="cv-minimal__section-title">Competencies</div>
-          <div class="cv-minimal__compgrid">
-            ${cv.competencies.map((c) => `<div>${escapeHtml(c)}</div>`).join("")}
-          </div>
-        </div>
-        <div>
-          <div class="cv-minimal__section-title">Skills & Tools</div>
-          <div>
-            ${cv.skills.map((s) => `<span class="cv-minimal__skill-pill">${escapeHtml(s)}</span>`).join("")}
-          </div>
-        </div>
-      </div>
-
-      <div class="cv-minimal__section">
-        <div class="cv-minimal__section-title">Education</div>
-        ${cv.education
-          .map(
-            (ed) => `
-          <div style="display:flex; justify-content:space-between; font-size:10px;">
-            <div>
-              <span style="font-weight:600;">${escapeHtml(ed.degree)}</span>
-              <span style="color: var(--muted);"> · ${escapeHtml(ed.school)}</span>
-            </div>
-            <span class="cv-meta">${escapeHtml(ed.dates)}</span>
-          </div>`
-          )
-          .join("")}
-      </div>
-
-      ${
-        cv.achievements && cv.achievements.length
-          ? `<div class="cv-minimal__section">
-               <div class="cv-minimal__section-title">Recognition</div>
-               ${cv.achievements
-                 .map((a) => `<div style="font-size:9.5px; color: var(--ink-soft);">· ${escapeHtml(a)}</div>`)
-                 .join("")}
-             </div>`
-          : ""
-      }
-    </div>
-  `;
-
-  const renderExecutive = (cv) => `
-    <div class="cv-a4 cv-executive">
-      <div class="cv-executive__sidebar">
-        <div class="cv-executive__kicker">Curriculum Vitae</div>
-        <h1 class="cv-executive__name">${escapeHtml(cv.name)}</h1>
-        <p class="cv-executive__title">${escapeHtml(cv.title)}</p>
-
-        <div class="cv-executive__side-section">
-          <div class="cv-executive__side-title">Contact</div>
-          <div class="cv-executive__contact">
-            <div>${escapeHtml(cv.location)}</div>
-            <div>${escapeHtml(cv.phone)}</div>
-            <div>${escapeHtml(cv.email)}</div>
-            ${cv.website ? `<div>${escapeHtml(cv.website)}</div>` : ""}
-          </div>
-        </div>
-
-        <div class="cv-executive__side-section">
-          <div class="cv-executive__side-title">Competencies</div>
-          <ul class="cv-executive__side-list">
-            ${cv.competencies.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}
-          </ul>
-        </div>
-
-        <div class="cv-executive__side-section">
-          <div class="cv-executive__side-title">Education</div>
-          ${cv.education
-            .map(
-              (ed) => `
-            <div class="cv-executive__edu-block">
-              <div class="d">${escapeHtml(ed.degree)}</div>
-              <div class="s">${escapeHtml(ed.school)}</div>
-              <div class="y">${escapeHtml(ed.dates)}</div>
-            </div>`
-            )
-            .join("")}
-        </div>
-
-        <div class="cv-executive__side-section">
-          <div class="cv-executive__side-title">Skills</div>
-          <div class="cv-executive__chips">
-            ${cv.skills.map((s) => `<span class="cv-executive__chip">${escapeHtml(s)}</span>`).join("")}
-          </div>
-        </div>
-      </div>
-
-      <div class="cv-executive__main">
-        <div class="cv-executive__section-title">Profile</div>
-        <p class="cv-executive__summary">${escapeHtml(cv.summary)}</p>
-
-        <div class="cv-executive__section-title">Professional Experience</div>
-        ${cv.experience
-          .map(
-            (e) => `
-          <div class="cv-executive__job">
-            <div class="cv-executive__job-head">
-              <div class="cv-executive__role">${escapeHtml(e.role)}</div>
-              <div class="cv-executive__date">${escapeHtml(e.dates)}</div>
-            </div>
-            <div class="cv-executive__co">${escapeHtml(e.company)} · ${escapeHtml(e.location)}</div>
-            <ul class="cv-executive__bullets">
-              ${e.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
-            </ul>
-          </div>`
-          )
-          .join("")}
-
-        ${
-          cv.achievements && cv.achievements.length
-            ? `<div class="cv-executive__section-title" style="margin-top:8px;">Recognition</div>
-               <ul class="cv-executive__bullets">
-                 ${cv.achievements.map((a) => `<li>${escapeHtml(a)}</li>`).join("")}
-               </ul>`
-            : ""
+  async function extractPdf(file) {
+    if (!window.pdfjsLib) throw new Error("PDF reader failed to load. Check your connection and reload.");
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    let out = "";
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      // Rebuild lines using the y-coordinate of each text item.
+      let lastY = null, line = "";
+      const lines = [];
+      content.items.forEach((it) => {
+        const y = it.transform[5];
+        if (lastY === null || Math.abs(y - lastY) < 3) {
+          line += it.str + (it.hasEOL ? "" : " ");
+        } else {
+          lines.push(line.trim());
+          line = it.str + " ";
         }
-      </div>
-    </div>
-  `;
+        lastY = y;
+      });
+      if (line.trim()) lines.push(line.trim());
+      out += lines.join("\n") + "\n";
+    }
+    return out.trim();
+  }
 
-  const renderModern = (cv) => {
-    const initials = cv.name
-      .split(" ")
-      .map((n) => n[0])
-      .slice(0, 2)
-      .join("");
-    return `
-      <div class="cv-a4 cv-modern">
-        <div class="cv-modern__sidebar">
-          <div class="cv-modern__avatar">${escapeHtml(initials)}</div>
-          <h1 class="cv-modern__name">${escapeHtml(cv.name)}</h1>
-          <p class="cv-modern__title">${escapeHtml(cv.title)}</p>
+  async function extractDocx(file) {
+    if (!window.mammoth) throw new Error("Word reader failed to load. Check your connection and reload.");
+    const buf = await file.arrayBuffer();
+    const res = await window.mammoth.extractRawText({ arrayBuffer: buf });
+    return (res.value || "").trim();
+  }
 
-          <div class="cv-modern__side-section">
-            <div class="cv-modern__side-title">Contact</div>
-            <div class="cv-modern__contact">
-              <div>${escapeHtml(cv.location)}</div>
-              <div>${escapeHtml(cv.phone)}</div>
-              <div>${escapeHtml(cv.email)}</div>
-              ${cv.website ? `<div>${escapeHtml(cv.website)}</div>` : ""}
-            </div>
-          </div>
+  async function extractText(file) {
+    const name = file.name.toLowerCase();
+    if (name.endsWith(".pdf")) return extractPdf(file);
+    if (name.endsWith(".docx")) return extractDocx(file);
+    if (name.endsWith(".txt")) return (await file.text()).trim();
+    throw new Error("Unsupported file type.");
+  }
 
-          <div class="cv-modern__side-section">
-            <div class="cv-modern__side-title">Core Competencies</div>
-            <ul class="cv-modern__side-list">
-              ${cv.competencies.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}
-            </ul>
-          </div>
+  /* ================================================================
+     2.  PARSE raw text -> structured CV  (best-effort, then editable)
+     ================================================================ */
 
-          <div class="cv-modern__side-section">
-            <div class="cv-modern__side-title">Skills & Tools</div>
-            <div>
-              ${cv.skills.map((s) => `<span class="cv-modern__skill-pill">${escapeHtml(s)}</span>`).join("")}
-            </div>
-          </div>
-
-          <div class="cv-modern__side-section">
-            <div class="cv-modern__side-title">Education</div>
-            ${cv.education
-              .map(
-                (ed) => `
-              <div class="cv-modern__edu-block">
-                <div class="d">${escapeHtml(ed.degree)}</div>
-                <div class="s">${escapeHtml(ed.school)}</div>
-                <div class="y">${escapeHtml(ed.dates)}</div>
-              </div>`
-              )
-              .join("")}
-          </div>
-        </div>
-
-        <div class="cv-modern__main">
-          <div class="cv-modern__section-title">Profile</div>
-          <p class="cv-modern__summary">${escapeHtml(cv.summary)}</p>
-
-          <div class="cv-modern__section-title">Experience</div>
-          ${cv.experience
-            .map(
-              (e) => `
-            <div class="cv-modern__job">
-              <div class="cv-modern__job-head">
-                <div class="cv-modern__role">${escapeHtml(e.role)}</div>
-                <div class="cv-modern__date">${escapeHtml(e.dates)}</div>
-              </div>
-              <div class="cv-modern__co">${escapeHtml(e.company)} · ${escapeHtml(e.location)}</div>
-              <ul class="cv-modern__bullets">
-                ${e.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
-              </ul>
-            </div>`
-            )
-            .join("")}
-
-          ${
-            cv.achievements && cv.achievements.length
-              ? `<div class="cv-modern__section-title">Recognition</div>
-                 <ul class="cv-modern__bullets">
-                   ${cv.achievements.map((a) => `<li>${escapeHtml(a)}</li>`).join("")}
-                 </ul>`
-              : ""
-          }
-        </div>
-      </div>
-    `;
+  const SECTION_KEYS = {
+    summary: ["summary", "profile", "objective", "about", "professional summary"],
+    experience: ["experience", "employment", "work history", "professional experience", "career"],
+    education: ["education", "academic", "qualifications"],
+    skills: ["skills", "technical skills", "tools", "competencies", "core competencies", "expertise"],
+    languages: ["languages", "language"],
+    achievements: ["achievements", "accomplishments", "awards", "recognition", "honors", "honours", "certifications"],
   };
+
+  const isHeading = (line) => {
+    const l = line.trim();
+    if (!l || l.length > 42) return null;
+    const low = l.toLowerCase().replace(/[:•\-–|]/g, "").trim();
+    for (const key in SECTION_KEYS) {
+      if (SECTION_KEYS[key].some((k) => low === k || low.startsWith(k + " ") || low === k + "s")) return key;
+    }
+    // ALL-CAPS short lines are likely headings too
+    return null;
+  };
+
+  const DATE_RE = /(\b(19|20)\d{2}\b|\bpresent\b|\bcurrent\b|\bnow\b)/i;
+  const BULLET_RE = /^\s*[•▪◦·\-–*]\s+/;
+
+  function parseCV(text) {
+    const rawLines = text.split(/\r?\n/).map((l) => l.replace(/\s+$/g, ""));
+    const lines = rawLines.map((l) => l.trim());
+
+    const cv = {
+      name: "", title: "", location: "", phone: "", email: "", website: "",
+      summary: "", competencies: [], experience: [], education: [],
+      skills: [], languages: [], achievements: [],
+    };
+
+    // ---- contact details (search whole text) ----
+    const email = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+    if (email) cv.email = email[0];
+    const phone = text.match(/(\+?\d[\d\s().\-]{6,}\d)/);
+    if (phone) cv.phone = phone[0].trim();
+    const emailDom = cv.email ? cv.email.split("@")[1].toLowerCase() : "";
+    const siteMatches = text.match(/((https?:\/\/)?(www\.)?(?:[a-z0-9-]+\.)+(?:com|net|io|me|dev|org|co|info))(\/[a-z0-9/.\-]*)?/gi) || [];
+    for (const m of siteMatches) {
+      const s = m.replace(/^https?:\/\//, "").replace(/^www\./, "");
+      const low = s.toLowerCase();
+      if (low === emailDom) continue;                       // skip the email's own domain
+      if (cv.email && cv.email.toLowerCase().includes(low)) continue;
+      cv.website = s; break;
+    }
+
+    // ---- name + title (first meaningful lines) ----
+    const firstReal = lines.filter(Boolean);
+    if (firstReal.length) {
+      // name: first line that is short, has no @/digits, not a heading
+      const nameLine = firstReal.find((l) =>
+        l.length <= 40 && !/[@\d]/.test(l) && !isHeading(l) && l.split(/\s+/).length <= 5
+      );
+      cv.name = nameLine || firstReal[0];
+      const idx = firstReal.indexOf(cv.name);
+      // title: next non-contact, non-heading line
+      for (let i = idx + 1; i < firstReal.length; i++) {
+        const l = firstReal[i];
+        if (isHeading(l)) break;
+        if (/[@]/.test(l) || /\d{4}/.test(l)) continue;
+        if (l === cv.phone || l === cv.email) continue;
+        if (l.length <= 60) { cv.title = l; break; }
+      }
+    }
+
+    // ---- location (look for a "City, Country" segment near the top) ----
+    let loc = "";
+    for (const l of firstReal.slice(0, 8)) {
+      for (const seg of l.split("|").map((s) => s.trim())) {
+        if (/^[A-Za-z][A-Za-z .'\-]+,\s*[A-Za-z][A-Za-z .'\-]+$/.test(seg) && seg.length < 40) { loc = seg; break; }
+      }
+      if (loc) break;
+    }
+    if (loc) cv.location = loc;
+
+    // ---- split into sections ----
+    const sections = {};
+    let current = "header";
+    sections[current] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const h = isHeading(lines[i]);
+      if (h) { current = h; sections[current] = sections[current] || []; continue; }
+      (sections[current] = sections[current] || []).push(rawLines[i]);
+    }
+
+    const joinClean = (arr) => (arr || []).map((l) => l.trim()).filter(Boolean);
+
+    // ---- summary ----
+    if (sections.summary) {
+      cv.summary = joinClean(sections.summary).join(" ").trim();
+    }
+    if (!cv.summary) {
+      // fallback: first sizeable paragraph in header that isn't contact
+      const para = joinClean(sections.header).filter(
+        (l) => l.length > 60 && l !== cv.name && l !== cv.title && !/[@]/.test(l)
+      );
+      if (para.length) cv.summary = para.join(" ");
+    }
+
+    // ---- skills / competencies ----
+    if (sections.skills) {
+      const items = joinClean(sections.skills)
+        .join(" ")
+        .split(/[•▪◦·,|/]|\s{2,}|\u2022/)
+        .map((s) => s.replace(BULLET_RE, "").trim())
+        .filter((s) => s && s.length <= 40);
+      cv.skills = dedupe(items).slice(0, 10);
+    }
+    cv.competencies = cv.skills.slice(0, 6);
+    cv.skills = cv.skills.slice(0, 8);
+
+    // ---- languages ----
+    if (sections.languages) {
+      cv.languages = dedupe(
+        joinClean(sections.languages).join(" ").split(/[•▪·,|/]|\s{2,}/).map((s) => s.trim()).filter(Boolean)
+      ).slice(0, 5);
+    }
+
+    // ---- achievements ----
+    if (sections.achievements) {
+      cv.achievements = joinClean(sections.achievements)
+        .map((l) => l.replace(BULLET_RE, "").trim())
+        .filter((l) => l.length > 3)
+        .slice(0, 5);
+    }
+
+    // ---- education ----
+    if (sections.education) {
+      const eds = joinClean(sections.education);
+      let buf = [];
+      const flush = () => {
+        if (!buf.length) return;
+        const degree = buf[0];
+        const rest = buf.slice(1).join(" · ");
+        const dm = (degree + " " + rest).match(DATE_RE);
+        let school = rest
+          .replace(DATE_RE, "")
+          .replace(/graduated\s*:?/i, "")          // drop "Graduated:" label
+          .split("|")[0]                            // drop trailing "| Location"
+          .replace(/[|·\s]+$/, "")
+          .trim();
+        cv.education.push({
+          degree: degree.replace(DATE_RE, "").replace(/[|·]+$/, "").trim(),
+          school,
+          dates: dm ? matchDates(degree + " " + rest) : "",
+        });
+        buf = [];
+      };
+      eds.forEach((l) => {
+        if (buf.length && (DATE_RE.test(l) === false) && buf.length >= 2) { flush(); }
+        buf.push(l.replace(BULLET_RE, "").trim());
+        if (DATE_RE.test(l)) flush();
+      });
+      flush();
+      cv.education = cv.education.filter((e) => e.degree).slice(0, 3);
+    }
+
+    // ---- experience ----
+    if (sections.experience) {
+      cv.experience = parseExperience(joinClean(sections.experience));
+    }
+
+    // Final fallbacks so the preview is never empty
+    if (!cv.name) cv.name = "Your Name";
+    if (!cv.title) cv.title = "Professional Title";
+    if (!cv.summary) cv.summary = "Add a 3–4 line professional summary tailored to the target role. Click here to edit.";
+    if (!cv.experience.length) cv.experience = [{ role: "Role", company: "Company", dates: "", location: "", bullets: ["Click to add an achievement-led bullet."] }];
+    if (!cv.education.length) cv.education = [{ degree: "Degree", school: "Institution", dates: "" }];
+    if (!cv.competencies.length) cv.competencies = ["Add a skill"];
+    if (!cv.skills.length) cv.skills = ["Add a tool"];
+
+    return cv;
+  }
+
+  function matchDates(s) {
+    const years = s.match(/\b(19|20)\d{2}\b/g) || [];
+    const pres = /present|current|now/i.test(s);
+    if (years.length >= 2) return `${years[0]} – ${years[1]}`;
+    if (years.length === 1) return pres ? `${years[0]} – Present` : years[0];
+    return pres ? "Present" : "";
+  }
+
+  function parseExperience(linesArr) {
+    const entries = [];
+    let cur = null;
+
+    const splitRole = (line) => {
+      // role/company on one line, separated by — – | or " at "
+      const parts = line.split(/\s+[—–]\s+|\s+\|\s+|\s+at\s+/i);
+      if (parts.length >= 2) return { role: parts[0].trim(), company: parts.slice(1).join(", ").trim() };
+      return { role: line.trim(), company: "" };
+    };
+
+    const startEntry = (line) => {
+      if (cur) entries.push(cur);
+      const { role, company } = splitRole(line);
+      cur = { role, company, location: "", dates: "", bullets: [] };
+    };
+
+    // A line that is essentially a date / date-range (optionally "… | Location")
+    const isDateLine = (line) => {
+      const head = line.split("|")[0].trim();
+      return DATE_RE.test(head) && head.length <= 32 &&
+        /(\b(19|20)\d{2}\b|present|current|now)/i.test(head) &&
+        // mostly month/year tokens, not a sentence
+        head.split(/\s+/).length <= 6 && !/[.;:]/.test(head);
+    };
+
+    for (const raw of linesArr) {
+      const line = raw.trim();
+      if (!line) continue;
+
+      if (BULLET_RE.test(raw)) {                       // bullet
+        if (!cur) startEntry("Role");
+        cur.bullets.push(line.replace(BULLET_RE, "").trim());
+        continue;
+      }
+      if (isDateLine(line)) {                          // date / location line
+        if (!cur) startEntry("Role");
+        const segs = line.split("|");
+        cur.dates = matchDates(segs[0]);
+        if (segs[1]) cur.location = segs[1].trim();
+        continue;
+      }
+      // plain text line
+      if (!cur || cur.bullets.length > 0 || (cur.dates && cur.company)) {
+        startEntry(line);                              // begin a new role
+      } else if (!cur.company) {
+        cur.company = line;                            // 2nd line = company
+      } else {
+        cur.bullets.push(line);                        // anything else → bullet
+      }
+    }
+    if (cur) entries.push(cur);
+
+    return entries
+      .map((e) => ({ ...e, bullets: e.bullets.filter(Boolean).slice(0, 6) }))
+      .filter((e) => e.role && e.role !== "Role")
+      .slice(0, 5);
+  }
+
+  const dedupe = (arr) => {
+    const seen = new Set(); const out = [];
+    arr.forEach((x) => { const k = x.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(x); } });
+    return out;
+  };
+
+  /* ================================================================
+     3.  REAL keyword analysis (CV vs JD)
+     ================================================================ */
+
+  const STOP = new Set("a an and the of to in for with on at by from as is are be will you your we our their they this that have has had can able role job description responsibilities requirements work team experience years strong excellent good ability across using use within into over more most than who what when where which while about per via etc including include provide ensure support help across also may must should would across other across".split(/\s+/));
+
+  const tokenize = (t) =>
+    (t.toLowerCase().match(/[a-z][a-z+#.\-]{2,}/g) || []).filter((w) => !STOP.has(w) && w.length >= 3);
+
+  function analyze(cv, jdText) {
+    const jdTokens = tokenize(jdText);
+    // rank JD keywords by frequency
+    const freq = {};
+    jdTokens.forEach((w) => (freq[w] = (freq[w] || 0) + 1));
+    const ranked = Object.keys(freq).sort((a, b) => freq[b] - freq[a]);
+
+    // Pull capitalised multiword phrases from JD as candidate skills
+    const phraseMatches = (jdText.match(/\b([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+){1,2})\b/g) || [])
+      .map((p) => p.trim())
+      .filter((p) => p.split(" ").length <= 3);
+    const phrases = dedupe(phraseMatches).slice(0, 8);
+
+    const cvText = JSON.stringify(cv).toLowerCase();
+    const cvTokens = new Set(tokenize(cvText));
+
+    const candidates = dedupe(ranked.slice(0, 28));
+    const matched = candidates.filter((w) => cvTokens.has(w));
+    const missing = candidates.filter((w) => !cvTokens.has(w));
+
+    const relevant = candidates.length || 1;
+    let score = Math.round((matched.length / relevant) * 100);
+    score = Math.max(28, Math.min(96, score)); // keep within a believable band
+
+    // Suggested improvements derived from real signals
+    const improvements = [];
+    if (missing.length) improvements.push(`Weave in role keywords you're missing: ${missing.slice(0, 5).join(", ")}.`);
+    const summaryWords = (cv.summary || "").split(/\s+/).length;
+    if (summaryWords < 40) improvements.push("Expand your summary to 3–4 lines that name the target role and its focus.");
+    const hasMetric = cv.experience.some((e) => e.bullets.some((b) => /\d/.test(b)));
+    if (!hasMetric) improvements.push("Add measurable results (%, $, counts) to at least two experience bullets.");
+    improvements.push("Reorder competencies so the role's top keywords appear first.");
+    improvements.push("Lead each bullet with an action verb (Led, Drove, Built, Delivered).");
+
+    return {
+      score,
+      matched: matched.slice(0, 12),
+      missing: missing.slice(0, 10),
+      phrases,
+      improvements: improvements.slice(0, 5),
+    };
+  }
+
+  /* ================================================================
+     4.  THEME RENDERERS  (every text node is editable + data-bound)
+     ================================================================ */
+
+  const esc = (s = "") =>
+    String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  // editable element
+  const ed = (path, val, tag, cls) =>
+    `<${tag || "span"}${cls ? ` class="${cls}"` : ""} contenteditable="true" data-bind="${path}" spellcheck="false">${esc(val)}</${tag || "span"}>`;
+
+  const addBtn = (arrPath, label) =>
+    `<span class="cv-add" data-add="${arrPath}">+ ${label || "add"}</span>`;
+
+  const bulletList = (expIndex, bullets) =>
+    `<ul class="bul">${bullets
+      .map((b, j) => `<li>${ed(`exp.${expIndex}.bullets.${j}`, b)}</li>`)
+      .join("")}</ul>${addBtn(`exp.${expIndex}.bullets`, "bullet")}`;
+
+  /* ---- Theme 1: Executive Minimal ---- */
+  function renderExec(cv) {
+    return `
+    <div class="cv-a4 t-exec">
+      <div class="t-exec__head">
+        <h1 class="t-exec__name">${ed("name", cv.name)}</h1>
+        <div class="t-exec__title">${ed("title", cv.title)}</div>
+        <div class="t-exec__contact">${ed("location", cv.location)} &nbsp;·&nbsp; ${ed("phone", cv.phone)} &nbsp;·&nbsp; ${ed("email", cv.email)}${cv.website ? ` &nbsp;·&nbsp; ${ed("website", cv.website)}` : ""}</div>
+      </div>
+
+      <div class="t-exec__sec">
+        <div class="t-exec__sec-title">Profile</div>
+        <p class="t-exec__summary">${ed("summary", cv.summary)}</p>
+      </div>
+
+      <div class="t-exec__sec">
+        <div class="t-exec__sec-title">Experience</div>
+        ${cv.experience.map((e, i) => `
+          <div class="t-exec__job">
+            <div class="t-exec__job-top">
+              <div><span class="t-exec__role">${ed(`exp.${i}.role`, e.role)}</span> <span class="t-exec__co">${ed(`exp.${i}.company`, e.company)}</span></div>
+              <div class="t-exec__date">${ed(`exp.${i}.dates`, e.dates)}</div>
+            </div>
+            ${bulletList(i, e.bullets)}
+          </div>`).join("")}
+        ${addBtn("exp", "role")}
+      </div>
+
+      <div class="t-exec__cols">
+        <div class="t-exec__sec">
+          <div class="t-exec__sec-title">Competencies</div>
+          <div class="t-exec__inline">${cv.competencies.map((c, i) => `<span class="t-exec__pill">${ed(`competencies.${i}`, c)}</span>`).join("")}</div>
+          ${addBtn("competencies", "skill")}
+        </div>
+        <div class="t-exec__sec">
+          <div class="t-exec__sec-title">Tools</div>
+          <div class="t-exec__inline">${cv.skills.map((c, i) => `<span class="t-exec__pill">${ed(`skills.${i}`, c)}</span>`).join("")}</div>
+          ${addBtn("skills", "tool")}
+        </div>
+      </div>
+
+      <div class="t-exec__cols">
+        <div class="t-exec__sec">
+          <div class="t-exec__sec-title">Education</div>
+          ${cv.education.map((e, i) => `<div class="t-exec__edu"><div class="d">${ed(`education.${i}.degree`, e.degree)}</div><div class="s">${ed(`education.${i}.school`, e.school)} · ${ed(`education.${i}.dates`, e.dates)}</div></div>`).join("")}
+        </div>
+        ${cv.achievements.length ? `<div class="t-exec__sec">
+          <div class="t-exec__sec-title">Recognition</div>
+          <ul class="bul">${cv.achievements.map((a, i) => `<li>${ed(`achievements.${i}`, a)}</li>`).join("")}</ul>
+          ${addBtn("achievements", "item")}
+        </div>` : ""}
+      </div>
+    </div>`;
+  }
+
+  /* ---- Theme 2: Creative Professional ---- */
+  function renderCreative(cv) {
+    return `
+    <div class="cv-a4 t-creative">
+      <div class="t-creative__band">
+        <h1 class="t-creative__name">${ed("name", cv.name)}</h1>
+        <div class="t-creative__title">${ed("title", cv.title)}</div>
+        <div class="t-creative__contact">
+          <span>${ed("location", cv.location)}</span><span>${ed("phone", cv.phone)}</span><span>${ed("email", cv.email)}</span>${cv.website ? `<span>${ed("website", cv.website)}</span>` : ""}
+        </div>
+      </div>
+      <div class="t-creative__body">
+        <div class="t-creative__sec">
+          <div class="t-creative__sec-title">Profile</div>
+          <p class="t-creative__summary">${ed("summary", cv.summary)}</p>
+        </div>
+        <div class="t-creative__sec">
+          <div class="t-creative__sec-title">Experience</div>
+          ${cv.experience.map((e, i) => `
+            <div class="t-creative__job">
+              <div class="t-creative__job-top">
+                <div><span class="t-creative__role">${ed(`exp.${i}.role`, e.role)}</span> — <span class="t-creative__co">${ed(`exp.${i}.company`, e.company)}</span></div>
+                <div class="t-creative__date">${ed(`exp.${i}.dates`, e.dates)}</div>
+              </div>
+              ${bulletList(i, e.bullets)}
+            </div>`).join("")}
+          ${addBtn("exp", "role")}
+        </div>
+        <div class="t-creative__cols">
+          <div>
+            <div class="t-creative__sec">
+              <div class="t-creative__sec-title">Education</div>
+              ${cv.education.map((e, i) => `<div class="t-creative__edu"><div class="d">${ed(`education.${i}.degree`, e.degree)}</div><div class="s">${ed(`education.${i}.school`, e.school)} · ${ed(`education.${i}.dates`, e.dates)}</div></div>`).join("")}
+            </div>
+            ${cv.achievements.length ? `<div class="t-creative__sec">
+              <div class="t-creative__sec-title">Recognition</div>
+              <ul class="bul">${cv.achievements.map((a, i) => `<li>${ed(`achievements.${i}`, a)}</li>`).join("")}</ul>
+              ${addBtn("achievements", "item")}
+            </div>` : ""}
+          </div>
+          <div>
+            <div class="t-creative__sec">
+              <div class="t-creative__sec-title">Skills</div>
+              <div class="t-creative__tags">${cv.competencies.map((c, i) => `<span class="t-creative__tag">${ed(`competencies.${i}`, c)}</span>`).join("")}</div>
+              ${addBtn("competencies", "skill")}
+            </div>
+            <div class="t-creative__sec">
+              <div class="t-creative__sec-title">Tools</div>
+              <div class="t-creative__tags">${cv.skills.map((c, i) => `<span class="t-creative__tag">${ed(`skills.${i}`, c)}</span>`).join("")}</div>
+              ${addBtn("skills", "tool")}
+            </div>
+            ${cv.languages.length ? `<div class="t-creative__sec">
+              <div class="t-creative__sec-title">Languages</div>
+              <div class="t-creative__tags">${cv.languages.map((c, i) => `<span class="t-creative__tag">${ed(`languages.${i}`, c)}</span>`).join("")}</div>
+              ${addBtn("languages", "language")}
+            </div>` : ""}
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  /* ---- Theme 3: Premium Sidebar ---- */
+  function renderSidebar(cv) {
+    return `
+    <div class="cv-a4 t-sidebar">
+      <div class="t-sidebar__aside">
+        <h1 class="t-sidebar__name">${ed("name", cv.name)}</h1>
+        <div class="t-sidebar__title">${ed("title", cv.title)}</div>
+
+        <div class="t-sidebar__sec">
+          <div class="t-sidebar__sec-title">Contact</div>
+          <div class="t-sidebar__contact">
+            <div>${ed("location", cv.location)}</div>
+            <div>${ed("phone", cv.phone)}</div>
+            <div>${ed("email", cv.email)}</div>
+            ${cv.website ? `<div>${ed("website", cv.website)}</div>` : ""}
+          </div>
+        </div>
+
+        <div class="t-sidebar__sec">
+          <div class="t-sidebar__sec-title">Skills</div>
+          <ul class="side">${cv.competencies.map((c, i) => `<li>${ed(`competencies.${i}`, c)}</li>`).join("")}</ul>
+          ${addBtn("competencies", "skill")}
+        </div>
+
+        <div class="t-sidebar__sec">
+          <div class="t-sidebar__sec-title">Tools</div>
+          <div class="t-sidebar__chips">${cv.skills.map((c, i) => `<span class="t-sidebar__chip">${ed(`skills.${i}`, c)}</span>`).join("")}</div>
+          ${addBtn("skills", "tool")}
+        </div>
+
+        ${cv.languages.length ? `<div class="t-sidebar__sec">
+          <div class="t-sidebar__sec-title">Languages</div>
+          <ul class="side">${cv.languages.map((c, i) => `<li>${ed(`languages.${i}`, c)}</li>`).join("")}</ul>
+          ${addBtn("languages", "language")}
+        </div>` : ""}
+
+        <div class="t-sidebar__sec">
+          <div class="t-sidebar__sec-title">Education</div>
+          ${cv.education.map((e, i) => `<div class="t-sidebar__edu"><div class="d">${ed(`education.${i}.degree`, e.degree)}</div><div class="s">${ed(`education.${i}.school`, e.school)}</div><div class="y">${ed(`education.${i}.dates`, e.dates)}</div></div>`).join("")}
+        </div>
+      </div>
+
+      <div class="t-sidebar__main">
+        <div class="t-sidebar__sec-main">
+          <div class="t-sidebar__main-title">Profile</div>
+          <p class="t-sidebar__summary">${ed("summary", cv.summary)}</p>
+        </div>
+        <div class="t-sidebar__sec-main">
+          <div class="t-sidebar__main-title">Experience</div>
+          ${cv.experience.map((e, i) => `
+            <div class="t-sidebar__job">
+              <div class="t-sidebar__job-top">
+                <div class="t-sidebar__role">${ed(`exp.${i}.role`, e.role)}</div>
+                <div class="t-sidebar__date">${ed(`exp.${i}.dates`, e.dates)}</div>
+              </div>
+              <div class="t-sidebar__co">${ed(`exp.${i}.company`, e.company)}${e.location ? `, ${ed(`exp.${i}.location`, e.location)}` : ""}</div>
+              ${bulletList(i, e.bullets)}
+            </div>`).join("")}
+          ${addBtn("exp", "role")}
+        </div>
+        ${cv.achievements.length ? `<div class="t-sidebar__sec-main">
+          <div class="t-sidebar__main-title">Recognition</div>
+          <ul class="bul">${cv.achievements.map((a, i) => `<li>${ed(`achievements.${i}`, a)}</li>`).join("")}</ul>
+          ${addBtn("achievements", "item")}
+        </div>` : ""}
+      </div>
+    </div>`;
+  }
+
+  /* ---- Theme 4: Modern Timeline ---- */
+  function renderTimeline(cv) {
+    return `
+    <div class="cv-a4 t-timeline">
+      <div class="t-timeline__head">
+        <h1 class="t-timeline__name">${ed("name", cv.name)}</h1>
+        <div class="t-timeline__title">${ed("title", cv.title)}</div>
+        <div class="t-timeline__rule"></div>
+        <div class="t-timeline__contact">
+          <span>${ed("location", cv.location)}</span><span>${ed("phone", cv.phone)}</span><span>${ed("email", cv.email)}</span>${cv.website ? `<span>${ed("website", cv.website)}</span>` : ""}
+        </div>
+      </div>
+
+      <div class="t-timeline__sec">
+        <div class="t-timeline__sec-title">Profile</div>
+        <p class="t-timeline__summary">${ed("summary", cv.summary)}</p>
+      </div>
+
+      <div class="t-timeline__sec">
+        <div class="t-timeline__sec-title">Experience</div>
+        <div class="t-timeline__track">
+          ${cv.experience.map((e, i) => `
+            <div class="t-timeline__node">
+              <div class="t-timeline__node-top">
+                <div><span class="t-timeline__role">${ed(`exp.${i}.role`, e.role)}</span> · <span class="t-timeline__co">${ed(`exp.${i}.company`, e.company)}</span></div>
+                <div class="t-timeline__date">${ed(`exp.${i}.dates`, e.dates)}</div>
+              </div>
+              ${bulletList(i, e.bullets)}
+            </div>`).join("")}
+        </div>
+        ${addBtn("exp", "role")}
+      </div>
+
+      <div class="t-timeline__cols">
+        <div>
+          <div class="t-timeline__sec-title">Competencies</div>
+          <div class="t-timeline__tags">${cv.competencies.map((c, i) => `<span class="t-timeline__tag">${ed(`competencies.${i}`, c)}</span>`).join("")}</div>
+          ${addBtn("competencies", "skill")}
+        </div>
+        <div>
+          <div class="t-timeline__sec-title">Tools</div>
+          <div class="t-timeline__tags">${cv.skills.map((c, i) => `<span class="t-timeline__tag">${ed(`skills.${i}`, c)}</span>`).join("")}</div>
+          ${addBtn("skills", "tool")}
+        </div>
+      </div>
+
+      <div class="t-timeline__cols" style="margin-top:6px;">
+        <div>
+          <div class="t-timeline__sec-title">Education</div>
+          ${cv.education.map((e, i) => `<div class="t-timeline__edu"><div class="d">${ed(`education.${i}.degree`, e.degree)}</div><div class="s">${ed(`education.${i}.school`, e.school)} · ${ed(`education.${i}.dates`, e.dates)}</div></div>`).join("")}
+        </div>
+        ${cv.achievements.length ? `<div>
+          <div class="t-timeline__sec-title">Recognition</div>
+          <ul class="bul">${cv.achievements.map((a, i) => `<li>${ed(`achievements.${i}`, a)}</li>`).join("")}</ul>
+          ${addBtn("achievements", "item")}
+        </div>` : ""}
+      </div>
+    </div>`;
+  }
 
   const THEMES = [
-    { id: "editorial", name: "Editorial", subtitle: "Two-column · Serif", render: renderEditorial },
-    { id: "minimal", name: "Minimal", subtitle: "Single column · Refined", render: renderMinimal },
-    { id: "executive", name: "Executive", subtitle: "Dark sidebar · Bold", render: renderExecutive },
-    { id: "modern", name: "Modern", subtitle: "Cream sidebar · Accents", render: renderModern },
+    { id: "exec", name: "Executive Minimal", sub: "Corporate · Centered", render: renderExec },
+    { id: "creative", name: "Creative Professional", sub: "Accent band · Bold", render: renderCreative },
+    { id: "sidebar", name: "Premium Sidebar", sub: "Left rail · Polished", render: renderSidebar },
+    { id: "timeline", name: "Modern Timeline", sub: "Timeline · Modern", render: renderTimeline },
   ];
 
-  const renderCV = (themeId, cv) => {
-    const t = THEMES.find((x) => x.id === themeId);
-    return t ? t.render(cv) : "";
+  const renderTheme = (id, cv) => {
+    const t = THEMES.find((x) => x.id === id) || THEMES[0];
+    return t.render(cv);
   };
 
-  /* ----------------------------------------------------------------
-     Stepper
-     ---------------------------------------------------------------- */
+  /* ================================================================
+     5.  DATA BINDING — edits flow straight back into state.cv
+     ================================================================ */
 
-  const renderStepper = () => {
-    const el = document.getElementById("stepper");
-    el.innerHTML = STEPS.map((label, i) => {
+  function setByPath(obj, path, value) {
+    const parts = path.split(".");
+    let o = obj;
+    for (let i = 0; i < parts.length - 1; i++) {
+      let k = /^\d+$/.test(parts[i]) ? Number(parts[i]) : parts[i];
+      if (o[k] == null) o[k] = /^\d+$/.test(parts[i + 1]) ? [] : {};
+      o = o[k];
+    }
+    let last = parts[parts.length - 1];
+    if (/^\d+$/.test(last)) last = Number(last);
+    o[last] = value;
+  }
+
+  function getByPath(obj, path) {
+    return path.split(".").reduce((o, k) => (o == null ? o : o[/^\d+$/.test(k) ? Number(k) : k]), obj);
+  }
+
+  /* ================================================================
+     6.  STEP NAVIGATION + STEPPER
+     ================================================================ */
+
+  function renderStepper() {
+    document.getElementById("stepper").innerHTML = STEPS.map((label, i) => {
       const n = i + 1;
-      const done = n < state.step;
-      const active = n === state.step;
+      const done = n < state.step, active = n === state.step;
       const num = done
-        ? `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`
+        ? `<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`
         : n;
-      const cls =
-        "stepper__num" + (done ? " stepper__num--done" : "") + (active ? " stepper__num--active" : "");
-      const labelCls = "stepper__label" + (active ? " stepper__label--active" : "");
       const sep = i < STEPS.length - 1 ? `<div class="stepper__line"></div>` : "";
-      return `
-        <div class="stepper__item">
-          <div class="${cls}">${num}</div>
-          <span class="${labelCls}">${label}</span>
-        </div>
-        ${sep}
-      `;
+      return `<div class="stepper__item">
+          <div class="stepper__num ${done ? "stepper__num--done" : ""} ${active ? "stepper__num--active" : ""}">${num}</div>
+          <span class="stepper__label ${active ? "stepper__label--active" : ""}">${label}</span>
+        </div>${sep}`;
     }).join("");
-  };
+  }
 
-  const showStep = (n) => {
+  function showStep(n) {
     state.step = n;
     for (let i = 1; i <= 4; i++) {
-      const el = document.getElementById("step-" + i);
-      if (i === n) el.classList.remove("step--hidden");
-      else el.classList.add("step--hidden");
+      document.getElementById("step-" + i).classList.toggle("step--hidden", i !== n);
     }
     renderStepper();
     window.scrollTo({ top: 0, behavior: "smooth" });
-  };
+  }
 
-  /* ----------------------------------------------------------------
-     Error banner
-     ---------------------------------------------------------------- */
-
-  const showError = (msg) => {
-    document.getElementById("error-text").textContent = msg;
-    document.getElementById("error-banner").classList.remove("banner--hidden");
-  };
-
-  const hideError = () => {
-    document.getElementById("error-banner").classList.add("banner--hidden");
-  };
-
+  /* ================================================================
+     7.  ERROR BANNER
+     ================================================================ */
+  const showError = (m) => { document.getElementById("error-text").textContent = m; document.getElementById("error-banner").classList.remove("banner--hidden"); };
+  const hideError = () => document.getElementById("error-banner").classList.add("banner--hidden");
   document.getElementById("error-close").addEventListener("click", hideError);
 
-  /* ----------------------------------------------------------------
-     Dropzone helpers (used for both CV and JD uploads)
-     ---------------------------------------------------------------- */
-
-  const setupDropzone = (zoneId, innerId, inputId, previewId, previewTextId, onFile, accept) => {
+  /* ================================================================
+     8.  DROPZONES
+     ================================================================ */
+  function setupDropzone(zoneId, innerId, inputId, accepts, onText, extractIds) {
     const zone = document.getElementById(zoneId);
     const inner = document.getElementById(innerId);
     const input = document.getElementById(inputId);
-    const preview = document.getElementById(previewId);
-    const previewText = document.getElementById(previewTextId);
 
-    const update = (file) => {
+    const fileTpl = (file, loading) => `
+      <div class="dropzone__file">
+        ${loading ? `<div class="dropzone__spin"></div>` :
+        `<svg viewBox="0 0 24 24" class="dropzone__file-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`}
+        <div>
+          <div class="dropzone__file-name">${esc(file.name)}</div>
+          <div class="dropzone__file-meta">${loading ? "Reading…" : (file.size / 1024).toFixed(1) + " KB · click to replace"}</div>
+        </div>
+      </div>`;
+
+    const handle = async (file) => {
       if (!file) return;
-      // simple validation by extension
       const name = file.name.toLowerCase();
-      const ok = accept.some((ext) => name.endsWith(ext));
-      if (!ok) {
-        showError(`Unsupported file. Try ${accept.join(", ")}`);
-        return;
-      }
+      if (!accepts.some((ext) => name.endsWith(ext))) { showError(`Unsupported file. Use ${accepts.join(", ")}.`); return; }
       hideError();
       zone.classList.add("dropzone--has-file");
-      inner.innerHTML = `
-        <div class="dropzone__file">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="dropzone__file-icon">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
-          </svg>
-          <div>
-            <div class="dropzone__file-name">${escapeHtml(file.name)}</div>
-            <div class="dropzone__file-meta">${(file.size / 1024).toFixed(1)} KB · click to replace</div>
-          </div>
-        </div>
-      `;
-      if (preview && previewText) {
-        previewText.textContent = `File ready: ${file.name}`;
-        preview.classList.remove("preview-strip--hidden");
+      inner.innerHTML = fileTpl(file, true);
+      try {
+        const text = await extractText(file);
+        inner.innerHTML = fileTpl(file, false);
+        if (extractIds && text) {
+          const body = document.getElementById(extractIds.body);
+          const count = document.getElementById(extractIds.count);
+          body.textContent = text.slice(0, 1400) + (text.length > 1400 ? "\n…" : "");
+          count.textContent = `${text.length.toLocaleString()} chars`;
+          document.getElementById(extractIds.wrap).classList.remove("extract--hidden");
+        }
+        onText(text, file);
+      } catch (e) {
+        inner.innerHTML = fileTpl(file, false);
+        showError(e.message || "Could not read that file. Try another, or paste the text.");
       }
-      onFile(file);
     };
 
-    input.addEventListener("change", (e) => {
-      if (e.target.files[0]) update(e.target.files[0]);
-    });
-
-    zone.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      zone.classList.add("dropzone--drag");
-    });
+    input.addEventListener("change", (e) => e.target.files[0] && handle(e.target.files[0]));
+    zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("dropzone--drag"); });
     zone.addEventListener("dragleave", () => zone.classList.remove("dropzone--drag"));
     zone.addEventListener("drop", (e) => {
-      e.preventDefault();
-      zone.classList.remove("dropzone--drag");
-      if (e.dataTransfer.files[0]) {
-        input.files = e.dataTransfer.files;
-        update(e.dataTransfer.files[0]);
-      }
+      e.preventDefault(); zone.classList.remove("dropzone--drag");
+      if (e.dataTransfer.files[0]) { input.files = e.dataTransfer.files; handle(e.dataTransfer.files[0]); }
     });
-  };
+  }
 
-  /* ----------------------------------------------------------------
-     CV upload (step 1)
-     ---------------------------------------------------------------- */
-
-  setupDropzone(
-    "cv-dropzone",
-    "cv-dropzone-inner",
-    "cv-input",
-    "cv-preview",
-    "cv-preview-text",
-    (file) => {
-      state.cvFile = file;
-      document.getElementById("to-step-2").disabled = false;
+  // CV dropzone — builds the REAL structured CV immediately on upload
+  setupDropzone("cv-dropzone", "cv-dropzone-inner", "cv-input", [".pdf", ".docx"],
+    (text) => {
+      state.cvText = text;
+      state.cv = parseCV(text);     // <-- real content becomes the working CV
+      document.getElementById("to-step-2").disabled = !text;
     },
-    [".pdf", ".docx"]
-  );
+    { wrap: "cv-extract", body: "cv-extract-body", count: "cv-extract-count" });
 
-  /* ----------------------------------------------------------------
-     JD (step 2)
-     ---------------------------------------------------------------- */
+  // JD dropzone
+  setupDropzone("jd-dropzone", "jd-dropzone-inner", "jd-input", [".pdf", ".docx", ".txt"],
+    (text) => {
+      state.jdText = text;
+      document.getElementById("to-step-3").disabled = text.trim().length < 20;
+    },
+    { wrap: "jd-extract", body: "jd-extract-body", count: "jd-extract-count" });
 
+  /* ================================================================
+     9.  JD paste + tabs
+     ================================================================ */
   const jdTextarea = document.getElementById("jd-text");
   jdTextarea.addEventListener("input", (e) => {
     state.jdText = e.target.value;
     document.getElementById("to-step-3").disabled = state.jdText.trim().length < 20;
   });
-
-  // Tabs
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       const mode = tab.getAttribute("data-jd-mode");
@@ -581,375 +824,313 @@
       tab.classList.add("tab--active");
       document.getElementById("jd-paste-pane").classList.toggle("hidden", mode !== "paste");
       document.getElementById("jd-upload-pane").classList.toggle("hidden", mode !== "upload");
-      // Recompute the gating
-      const ready =
-        (mode === "paste" && state.jdText.trim().length >= 20) ||
-        (mode === "upload" && !!state.jdFile);
-      document.getElementById("to-step-3").disabled = !ready;
+      document.getElementById("to-step-3").disabled = state.jdText.trim().length < 20;
     });
   });
 
-  setupDropzone(
-    "jd-dropzone",
-    "jd-dropzone-inner",
-    "jd-input",
-    "jd-preview",
-    "jd-preview-text",
-    (file) => {
-      state.jdFile = file;
-      // mark a placeholder JD text so analysis still works
-      if (!state.jdText.trim()) {
-        state.jdText = `[Attached file: ${file.name}] — Job description supplied via file upload.`;
-      }
-      document.getElementById("to-step-3").disabled = false;
-    },
-    [".pdf", ".docx", ".txt"]
-  );
-
-  /* ----------------------------------------------------------------
-     Theme selection (step 3) + theme switcher (step 4)
-     ---------------------------------------------------------------- */
-
-  const renderThemeGrid = () => {
+  /* ================================================================
+     10.  TEMPLATE THUMBNAILS (step 3) + switcher (step 4)
+     ================================================================ */
+  function renderThemeGrid() {
     const grid = document.getElementById("theme-grid");
-    grid.innerHTML = THEMES.map(
-      (t) => `
+    const cv = state.cv || PLACEHOLDER_CV;
+    grid.innerHTML = THEMES.map((t) => `
       <button class="theme-thumb ${state.selectedTheme === t.id ? "theme-thumb--selected" : ""}" data-theme="${t.id}">
-        <div class="theme-thumb__frame">
-          <div class="theme-thumb__scaler" data-thumb-scaler>
-            ${t.render(SAMPLE_TAILORED_CV)}
-          </div>
-        </div>
+        <div class="theme-thumb__frame"><div class="theme-thumb__scaler" data-scaler>${t.render(cv)}</div></div>
         <div class="theme-thumb__meta">
-          <div>
-            <div class="theme-thumb__name">${t.name}</div>
-            <div class="theme-thumb__sub">${t.subtitle}</div>
-          </div>
-          <div class="theme-thumb__check">
-            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-          </div>
+          <div><div class="theme-thumb__name">${t.name}</div><div class="theme-thumb__sub">${t.sub}</div></div>
+          <div class="theme-thumb__check"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div>
         </div>
-      </button>`
-    ).join("");
+      </button>`).join("");
 
-    // Wire click + size thumbnails responsively
-    grid.querySelectorAll(".theme-thumb").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.selectedTheme = btn.getAttribute("data-theme");
-        renderThemeGrid();
-      });
-    });
+    grid.querySelectorAll(".theme-thumb").forEach((btn) =>
+      btn.addEventListener("click", () => { state.selectedTheme = btn.getAttribute("data-theme"); renderThemeGrid(); }));
 
-    // Size each scaler to match its container width
+    // disable editing inside thumbnails + scale to fit
     requestAnimationFrame(() => {
       grid.querySelectorAll(".theme-thumb__frame").forEach((frame) => {
-        const scaler = frame.querySelector("[data-thumb-scaler]");
-        const w = frame.clientWidth;
-        // A4 width in px ≈ 794 (210mm at ~96dpi). Scale to fit frame width.
-        const scale = w / 794;
-        scaler.style.transform = `scale(${scale})`;
+        const scaler = frame.querySelector("[data-scaler]");
+        scaler.querySelectorAll("[contenteditable]").forEach((n) => n.setAttribute("contenteditable", "false"));
+        scaler.querySelectorAll(".cv-add").forEach((n) => (n.style.display = "none"));
+        scaler.style.transform = `scale(${frame.clientWidth / 794})`;
       });
     });
-  };
+  }
 
-  // Re-scale thumbnails on resize
-  window.addEventListener("resize", () => {
-    const grid = document.getElementById("theme-grid");
-    if (!grid) return;
-    grid.querySelectorAll(".theme-thumb__frame").forEach((frame) => {
-      const scaler = frame.querySelector("[data-thumb-scaler]");
-      if (!scaler) return;
-      const w = frame.clientWidth;
-      scaler.style.transform = `scale(${w / 794})`;
-    });
-    rescalePreview();
-  });
-
-  const renderThemeSwitcher = () => {
+  function renderThemeSwitcher() {
     const el = document.getElementById("theme-switcher");
-    el.innerHTML = THEMES.map(
-      (t) =>
-        `<button class="theme-switch ${state.selectedTheme === t.id ? "theme-switch--active" : ""}" data-theme="${t.id}">${t.name}</button>`
-    ).join("");
-    el.querySelectorAll(".theme-switch").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.selectedTheme = btn.getAttribute("data-theme");
-        renderThemeSwitcher();
-        renderPreview();
-      });
-    });
-  };
+    el.innerHTML = THEMES.map((t) =>
+      `<button class="theme-switch ${state.selectedTheme === t.id ? "theme-switch--active" : ""}" data-theme="${t.id}">${t.name}</button>`).join("");
+    el.querySelectorAll(".theme-switch").forEach((btn) =>
+      btn.addEventListener("click", () => { state.selectedTheme = btn.getAttribute("data-theme"); renderThemeSwitcher(); renderPreview(); }));
+  }
 
-  /* ----------------------------------------------------------------
-     Simulated AI analysis
-     ---------------------------------------------------------------- */
-
-  const KEYWORD_BANK = [
-    "stakeholder management", "cross-functional", "data-driven", "go-to-market",
-    "product-led growth", "ATS optimisation", "OKRs", "lifecycle marketing",
-    "agile delivery", "P&L ownership", "narrative development", "competitive intelligence",
-    "executive communication", "customer research", "growth marketing",
-  ];
-
-  const GAP_BANK = [
-    "Some of the target seniority signals could be reinforced earlier in the summary.",
-    "Volume metrics for the highlighted launches are implicit; the role asks for explicit numbers.",
-    "Cross-regional / international scope isn't called out, though the JD emphasises it.",
-    "Consider adding a recent certification or course aligned to the role's tooling stack.",
-  ];
-
-  const IMPROVEMENT_BANK = [
-    "Rewrote the summary to lead with the role's exact title and seniority signal.",
-    "Promoted three keywords from the JD into bullet leads instead of trailing them.",
-    "Compressed early-career roles to make room for higher-impact recent achievements.",
-    "Standardised metric formatting (e.g. $4.2M, 38%) so the ATS parses them cleanly.",
-    "Reordered competencies to mirror the order in which they appear in the JD.",
-    "Tightened verbs — replaced 'helped with' and 'worked on' with achievement-led phrasing.",
-  ];
-
-  const pickRandom = (arr, n) => {
-    const a = arr.slice();
-    const picked = [];
-    while (picked.length < n && a.length) {
-      const i = Math.floor(Math.random() * a.length);
-      picked.push(a.splice(i, 1)[0]);
-    }
-    return picked;
-  };
-
-  const simulateAnalysis = () => {
-    // Derive a score from the JD length so the demo isn't fully random
-    const len = state.jdText.length;
-    const base = Math.min(85, 40 + Math.floor(len / 80));
-    const jitter = Math.floor(Math.random() * 8) - 4;
-    const score = Math.max(35, Math.min(78, base + jitter));
-
-    return {
-      score,
-      missingKeywords: pickRandom(KEYWORD_BANK, 5 + Math.floor(Math.random() * 2)),
-      gaps: pickRandom(GAP_BANK, 2 + Math.floor(Math.random() * 2)),
-      improvements: pickRandom(IMPROVEMENT_BANK, 4),
-    };
-  };
-
-  const runAnalysis = () => {
+  /* ================================================================
+     11.  ENHANCE (run analysis) -> dashboard
+     ================================================================ */
+  function runAnalysis() {
     hideError();
+    if (!state.cv) { showError("Upload a CV first."); return; }
     document.getElementById("loader").classList.remove("loader--hidden");
     document.getElementById("run-analysis").disabled = true;
 
-    // Simulate latency so the loader feels purposeful
     setTimeout(() => {
-      state.analysis = simulateAnalysis();
-      state.cv = SAMPLE_TAILORED_CV;
+      state.analysis = analyze(state.cv, state.jdText);
       document.getElementById("loader").classList.add("loader--hidden");
       document.getElementById("run-analysis").disabled = false;
-      paintResults();
+      paintDashboard();
       showStep(4);
-    }, 1800);
-  };
+      requestAnimationFrame(() => { renderPreview(); animateScore(); });
+    }, 1500);
+  }
 
-  /* ----------------------------------------------------------------
-     Paint results (step 4)
-     ---------------------------------------------------------------- */
-
-  const paintResults = () => {
+  function paintDashboard() {
     const a = state.analysis;
 
-    // Missing keywords
-    const chips = document.getElementById("missing-keywords");
-    chips.innerHTML = a.missingKeywords.length
-      ? a.missingKeywords.map((k) => `<span class="chip">${escapeHtml(k)}</span>`).join("")
-      : `<span style="font-size:12px;color:var(--muted)">None — your CV already covers the brief.</span>`;
+    const matched = document.getElementById("matched-keywords");
+    matched.innerHTML = a.matched.length
+      ? a.matched.map((k) => `<span class="chip chip--ok">${esc(k)}</span>`).join("")
+      : `<span class="chips__empty">No direct matches yet — add the role's keywords.</span>`;
 
-    // Gaps
-    const gapsEl = document.getElementById("gaps-list");
-    gapsEl.innerHTML = a.gaps.length
-      ? a.gaps.map((g) => `<li>${escapeHtml(g)}</li>`).join("")
-      : `<li style="color:var(--muted)">No meaningful gaps detected.</li>`;
+    const missing = document.getElementById("missing-keywords");
+    missing.innerHTML = a.missing.length
+      ? a.missing.map((k) => `<span class="chip">${esc(k)}</span>`).join("")
+      : `<span class="chips__empty">Great — your CV already covers the brief.</span>`;
 
-    // Improvements
-    const impEl = document.getElementById("improvements-list");
-    impEl.innerHTML = a.improvements.map((g) => `<li>${escapeHtml(g)}</li>`).join("");
+    document.getElementById("improvements-list").innerHTML =
+      a.improvements.map((g) => `<li>${esc(g)}</li>`).join("");
 
-    // Score ring (circumference = 2πr where r = 38 ≈ 238.76)
-    const c = 2 * Math.PI * 38;
-    const offset = c - (c * a.score) / 100;
+    document.getElementById("score-label").textContent =
+      a.score >= 75 ? "Strong fit" : a.score >= 55 ? "Good fit" : a.score >= 40 ? "Partial fit" : "Needs work";
+    document.getElementById("score-note").textContent =
+      `${a.matched.length} of ${a.matched.length + a.missing.length} key terms present. Edit the preview to raise it.`;
+
+    renderThemeSwitcher();
+  }
+
+  function animateScore() {
+    const a = state.analysis; if (!a) return;
+    const c = 2 * Math.PI * 40; // r=40
     const circle = document.getElementById("score-circle");
-    circle.setAttribute("stroke-dasharray", c.toFixed(2));
-    // Reset to full then animate
-    circle.setAttribute("stroke-dashoffset", c.toFixed(2));
-    setTimeout(() => {
-      circle.setAttribute("stroke-dashoffset", offset.toFixed(2));
-    }, 100);
+    circle.setAttribute("stroke-dasharray", c.toFixed(1));
+    circle.setAttribute("stroke-dashoffset", c.toFixed(1));
+    setTimeout(() => circle.setAttribute("stroke-dashoffset", (c - (c * a.score) / 100).toFixed(1)), 80);
 
-    // Score number — animate count up
-    const valEl = document.getElementById("score-value");
-    let current = 0;
-    const target = a.score;
-    const duration = 900;
-    const startTs = performance.now();
+    const val = document.getElementById("score-value");
+    const start = performance.now(), dur = 900;
     const tick = (ts) => {
-      const t = Math.min(1, (ts - startTs) / duration);
-      current = Math.round(target * (1 - Math.pow(1 - t, 3)));
-      valEl.textContent = current;
+      const t = Math.min(1, (ts - start) / dur);
+      val.textContent = Math.round(a.score * (1 - Math.pow(1 - t, 3)));
       if (t < 1) requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+  }
 
-    renderThemeSwitcher();
+  // "Add all" missing keywords -> append into competencies, then refresh
+  document.getElementById("apply-keywords").addEventListener("click", () => {
+    if (!state.cv || !state.analysis) return;
+    const add = state.analysis.missing.map((k) => k.charAt(0).toUpperCase() + k.slice(1));
+    state.cv.competencies = dedupe(state.cv.competencies.concat(add)).slice(0, 10);
+    // recompute analysis against updated CV
+    state.analysis = analyze(state.cv, state.jdText);
+    paintDashboard();
     renderPreview();
-  };
+    animateScore();
+  });
 
-  /* ----------------------------------------------------------------
-     Live A4 preview
-     ---------------------------------------------------------------- */
-
-  const rescalePreview = () => {
+  /* ================================================================
+     12.  LIVE PREVIEW (single source of truth for downloads)
+     ================================================================ */
+  function rescalePreview() {
     const scaler = document.getElementById("preview-stage-scaler");
+    const root = document.getElementById("cv-print-root");
     if (!scaler || !state.cv) return;
     const stage = scaler.parentElement;
-    const stageWidth = stage.clientWidth - 80; // account for padding
-    const a4Px = 794; // ~ 210mm at 96dpi
-    const scale = Math.min(1, stageWidth / a4Px);
+    const stageW = stage.clientWidth - 64;
+    const a4W = 794, a4H = 1123;
+    const fit = Math.min(1, stageW / a4W);
+    const scale = state.zoom || fit;
     scaler.style.transform = `scale(${scale})`;
-    // Make container height match scaled height so the page doesn't overflow visibly
-    const a4Height = 1123; // ~ 297mm at 96dpi
-    scaler.style.height = `${a4Height * scale}px`;
-    scaler.style.width = `${a4Px * scale}px`;
-  };
+    scaler.style.width = a4W * scale + "px";
+    scaler.style.height = a4H * scale + "px";
+    document.getElementById("zoom-label").textContent = state.zoom ? Math.round(scale * 100) + "%" : "Fit";
+  }
 
-  const renderPreview = () => {
+  function renderPreview() {
     if (!state.cv) return;
-    const root = document.getElementById("cv-print-root");
-    root.innerHTML = renderCV(state.selectedTheme, state.cv);
+    document.getElementById("cv-print-root").innerHTML = renderTheme(state.selectedTheme, state.cv);
     rescalePreview();
-  };
+    if (state.focusBind) { restoreFocus(state.focusBind); state.focusBind = null; }
+  }
 
-  /* ----------------------------------------------------------------
-     Downloads
-     ---------------------------------------------------------------- */
+  function restoreFocus(path) {
+    const el = document.querySelector(`#cv-print-root [data-bind="${CSS.escape(path)}"]`);
+    if (!el) return;
+    el.focus();
+    const range = document.createRange();
+    range.selectNodeContents(el); range.collapse(false);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  }
 
-  const downloadPdf = () => {
-    // Use the browser's print dialog. The print CSS isolates #cv-print-root.
-    // Briefly remove the transform so it prints at 100%.
+  // Delegated editing — write edits straight back into state.cv (no re-render -> caret kept)
+  const printRoot = document.getElementById("cv-print-root");
+  printRoot.addEventListener("input", (e) => {
+    const node = e.target.closest("[data-bind]");
+    if (!node) return;
+    setByPath(state.cv, node.getAttribute("data-bind"), node.textContent);
+  });
+
+  // Backspace on an empty array item removes it
+  printRoot.addEventListener("keydown", (e) => {
+    const node = e.target.closest("[data-bind]");
+    if (!node) return;
+    if (e.key === "Backspace" && node.textContent.trim() === "") {
+      const path = node.getAttribute("data-bind");
+      const parts = path.split(".");
+      const last = parts[parts.length - 1];
+      if (/^\d+$/.test(last)) {
+        const arrPath = parts.slice(0, -1).join(".");
+        const arr = getByPath(state.cv, arrPath);
+        if (Array.isArray(arr) && arr.length > 1) {
+          e.preventDefault();
+          arr.splice(Number(last), 1);
+          renderPreview();
+        }
+      }
+    }
+  });
+
+  // "+ add" buttons
+  printRoot.addEventListener("click", (e) => {
+    const add = e.target.closest(".cv-add");
+    if (!add) return;
+    const arrPath = add.getAttribute("data-add");
+    if (arrPath === "exp") {
+      state.cv.experience.push({ role: "New role", company: "Company", dates: "", location: "", bullets: ["New achievement"] });
+      state.focusBind = `exp.${state.cv.experience.length - 1}.role`;
+    } else {
+      const arr = getByPath(state.cv, arrPath);
+      if (Array.isArray(arr)) {
+        arr.push("");
+        state.focusBind = `${arrPath}.${arr.length - 1}`;
+      }
+    }
+    renderPreview();
+  });
+
+  /* ================================================================
+     13.  ZOOM
+     ================================================================ */
+  document.getElementById("zoom-in").addEventListener("click", () => {
+    const cur = state.zoom || fitScale();
+    state.zoom = Math.min(1.6, cur + 0.1); rescalePreview();
+  });
+  document.getElementById("zoom-out").addEventListener("click", () => {
+    const cur = state.zoom || fitScale();
+    const next = cur - 0.1;
+    state.zoom = next <= fitScale() ? null : next; rescalePreview();
+  });
+  function fitScale() {
+    const stage = document.getElementById("preview-stage");
+    return Math.min(1, (stage.clientWidth - 64) / 794);
+  }
+
+  /* ================================================================
+     14.  DOWNLOADS — always serialise the LIVE preview node
+     ================================================================ */
+  function liveCloneHtml() {
+    // Clone the rendered CV, strip editing affordances, return outerHTML
+    const root = document.getElementById("cv-print-root");
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll("[contenteditable]").forEach((n) => n.removeAttribute("contenteditable"));
+    clone.querySelectorAll(".cv-add").forEach((n) => n.remove());
+    return clone.innerHTML;
+  }
+
+  function collectCss() {
+    return Array.from(document.styleSheets).map((sheet) => {
+      try { return Array.from(sheet.cssRules).map((r) => r.cssText).join("\n"); }
+      catch (e) { return ""; }
+    }).join("\n");
+  }
+
+  function downloadPdf() {
+    if (!state.cv) return;
+    // Temporarily un-scale so print captures the page at 100%
     const scaler = document.getElementById("preview-stage-scaler");
-    const savedT = scaler.style.transform;
-    const savedW = scaler.style.width;
-    const savedH = scaler.style.height;
-    scaler.style.transform = "none";
-    scaler.style.width = "auto";
-    scaler.style.height = "auto";
+    const t = scaler.style.transform, w = scaler.style.width, h = scaler.style.height;
+    scaler.style.transform = "none"; scaler.style.width = "auto"; scaler.style.height = "auto";
     setTimeout(() => {
       window.print();
-      // Restore after print dialog
-      setTimeout(() => {
-        scaler.style.transform = savedT;
-        scaler.style.width = savedW;
-        scaler.style.height = savedH;
-      }, 200);
-    }, 50);
-  };
+      setTimeout(() => { scaler.style.transform = t; scaler.style.width = w; scaler.style.height = h; }, 300);
+    }, 60);
+  }
 
-  const downloadWord = () => {
-    const node = document.getElementById("cv-print-root");
-    if (!node) return;
-    const cv = state.cv || SAMPLE_TAILORED_CV;
-
-    // Pull current stylesheet so the doc renders close to the on-screen design
-    const css = Array.from(document.styleSheets)
-      .map((sheet) => {
-        try {
-          return Array.from(sheet.cssRules)
-            .map((r) => r.cssText)
-            .join("\n");
-        } catch (e) {
-          return "";
-        }
-      })
-      .join("\n");
-
+  function downloadWord() {
+    if (!state.cv) return;
+    const css = collectCss();
+    const body = liveCloneHtml(); // <- the ACTUAL enhanced + edited CV
+    const fontFix = `
+      .cv-a4{font-family:Calibri,Arial,sans-serif;}
+      .t-exec__name,.t-creative__name,.t-sidebar__name,.t-timeline__name,
+      .t-exec__sec-title,.t-creative__sec-title,.t-sidebar__role,.t-timeline__sec-title{font-family:Georgia,'Times New Roman',serif;}
+      .cv-a4{box-shadow:none !important;}
+      body{margin:0;}
+    `;
     const html = `<!DOCTYPE html><html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-<head><meta charset='utf-8'><title>${escapeHtml(cv.name)} - CV</title>
-<style>${css}
-body{margin:0;padding:0;background:#fff;}
-.cv-a4{box-shadow:none !important;}
-</style></head>
-<body>${node.innerHTML}</body></html>`;
-
+<head><meta charset='utf-8'><title>${esc(state.cv.name)} CV</title>
+<style>${css}\n${fontFix}</style></head><body>${body}</body></html>`;
     const blob = new Blob(["\ufeff", html], { type: "application/msword" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${cv.name.replace(/\s+/g, "_")}_Tailored.doc`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    a.download = `${(state.cv.name || "CV").replace(/\s+/g, "_")}_Tailored.doc`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
+  }
 
-  /* ----------------------------------------------------------------
-     Reset
-     ---------------------------------------------------------------- */
-
-  const resetAll = () => {
-    state.cvFile = null;
-    state.jdText = "";
-    state.jdFile = null;
-    state.analysis = null;
-    state.cv = null;
-    state.selectedTheme = "editorial";
-
-    document.getElementById("cv-input").value = "";
-    document.getElementById("jd-input").value = "";
-    document.getElementById("jd-text").value = "";
-
-    // Reset CV dropzone
-    document.getElementById("cv-dropzone").classList.remove("dropzone--has-file");
-    document.getElementById("cv-dropzone-inner").innerHTML = `
-      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="dropzone__icon">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-      </svg>
-      <div class="dropzone__title">Drop your file here, or click to browse</div>
-      <div class="dropzone__hint">Supported · PDF, DOCX · Max 10MB</div>`;
-    document.getElementById("cv-preview").classList.add("preview-strip--hidden");
-
-    // Reset JD dropzone
-    document.getElementById("jd-dropzone").classList.remove("dropzone--has-file");
-    document.getElementById("jd-dropzone-inner").innerHTML = `
-      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="dropzone__icon">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-      </svg>
-      <div class="dropzone__title">Drop your file here, or click to browse</div>
-      <div class="dropzone__hint">Supported · PDF, DOCX, TXT</div>`;
-    document.getElementById("jd-preview").classList.add("preview-strip--hidden");
-
-    document.getElementById("to-step-2").disabled = true;
-    document.getElementById("to-step-3").disabled = true;
-
-    renderThemeGrid();
-    showStep(1);
-  };
-
-  /* ----------------------------------------------------------------
-     Wire navigation buttons
-     ---------------------------------------------------------------- */
-
-  document.getElementById("to-step-2").addEventListener("click", () => showStep(2));
-  document.getElementById("back-step-1").addEventListener("click", () => showStep(1));
-  document.getElementById("to-step-3").addEventListener("click", () => {
-    showStep(3);
-    // Render thumbnails after the section is visible (so widths exist)
-    requestAnimationFrame(renderThemeGrid);
-  });
-  document.getElementById("back-step-2").addEventListener("click", () => showStep(2));
-  document.getElementById("run-analysis").addEventListener("click", runAnalysis);
-  document.getElementById("reset-all").addEventListener("click", resetAll);
   document.getElementById("download-pdf").addEventListener("click", downloadPdf);
   document.getElementById("download-word").addEventListener("click", downloadWord);
 
-  /* ----------------------------------------------------------------
-     Init
-     ---------------------------------------------------------------- */
+  /* ================================================================
+     15.  RESET
+     ================================================================ */
+  function resetDropzone(zoneId, innerId, inputId, title, hint) {
+    document.getElementById(inputId).value = "";
+    document.getElementById(zoneId).classList.remove("dropzone--has-file");
+    document.getElementById(innerId).innerHTML = `
+      <svg viewBox="0 0 24 24" class="dropzone__icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      <div class="dropzone__title">${title}</div><div class="dropzone__hint">${hint}</div>`;
+  }
+
+  document.getElementById("reset-all").addEventListener("click", () => {
+    Object.assign(state, { step: 1, cvText: "", cv: null, jdMode: "paste", jdText: "", selectedTheme: "exec", analysis: null, zoom: null, focusBind: null });
+    document.getElementById("jd-text").value = "";
+    document.getElementById("cv-extract").classList.add("extract--hidden");
+    document.getElementById("jd-extract").classList.add("extract--hidden");
+    resetDropzone("cv-dropzone", "cv-dropzone-inner", "cv-input", "Drop your file here, or click to browse", "PDF · DOCX");
+    resetDropzone("jd-dropzone", "jd-dropzone-inner", "jd-input", "Drop the job description, or click to browse", "PDF · DOCX · TXT");
+    document.getElementById("to-step-2").disabled = true;
+    document.getElementById("to-step-3").disabled = true;
+    document.querySelectorAll(".tab").forEach((t, i) => t.classList.toggle("tab--active", i === 0));
+    document.getElementById("jd-paste-pane").classList.remove("hidden");
+    document.getElementById("jd-upload-pane").classList.add("hidden");
+    showStep(1);
+  });
+
+  /* ================================================================
+     16.  WIRE NAV + INIT
+     ================================================================ */
+  document.getElementById("to-step-2").addEventListener("click", () => showStep(2));
+  document.getElementById("back-step-1").addEventListener("click", () => showStep(1));
+  document.getElementById("to-step-3").addEventListener("click", () => { showStep(3); requestAnimationFrame(renderThemeGrid); });
+  document.getElementById("back-step-2").addEventListener("click", () => showStep(2));
+  document.getElementById("run-analysis").addEventListener("click", runAnalysis);
+
+  window.addEventListener("resize", () => {
+    if (state.step === 3) renderThemeGrid();
+    if (state.step === 4) rescalePreview();
+  });
 
   renderStepper();
 })();
